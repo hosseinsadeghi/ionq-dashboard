@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  min-height: 100vh;
+  background: #06070d;
+  color: #e5e7eb;
+  font-family: "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(139, 92, 246, 0.35);
+  color: white;
+}
+
+/* Subtle scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.18);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.35);
+}
+
+@layer components {
+  .glass {
+    @apply bg-ink-800/60 backdrop-blur-xl border border-white/5 rounded-2xl shadow-soft;
+  }
+  .glass-hover {
+    @apply transition hover:border-accent-violet/30 hover:shadow-glow;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium border;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium
+           bg-white/5 hover:bg-white/10 border border-white/10 transition;
+  }
+  .btn-primary {
+    @apply inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold
+           text-white bg-gradient-to-r from-accent-violet to-accent-indigo
+           shadow-glow hover:brightness-110 transition;
+  }
+  .input {
+    @apply w-full rounded-xl bg-ink-900/80 border border-white/10 px-3.5 py-2.5
+           text-sm text-white placeholder:text-white/30
+           focus:outline-none focus:ring-2 focus:ring-accent-violet/50 focus:border-accent-violet/40;
+  }
+  .label {
+    @apply text-xs uppercase tracking-wider text-white/40 font-semibold;
+  }
+  .skeleton {
+    background-image: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.03) 0px,
+      rgba(255, 255, 255, 0.07) 40px,
+      rgba(255, 255, 255, 0.03) 80px
+    );
+    background-size: 400px 100%;
+    @apply animate-shimmer rounded-md;
+  }
+}
+
+.bg-grid {
+  background-image: linear-gradient(
+      rgba(255, 255, 255, 0.025) 1px,
+      transparent 1px
+    ),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+}
