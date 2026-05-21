@@ -5,7 +5,7 @@ import {
   ListChecks,
   LogOut,
 } from "lucide-react";
-import { fingerprint, getKey, setKey } from "../lib/api.js";
+import { fingerprint, getKey, getKeyName, clearAuth } from "../lib/api.js";
 
 const NAV = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -50,18 +50,19 @@ export default function Sidebar({ view, setView, onLogout, whoami }) {
       <div className="mt-auto">
         <div className="glass mb-3 p-3">
           <div className="label mb-1">Active key</div>
-          <div className="font-mono text-xs text-white/80">
-            {fingerprint(getKey())}
+          <div className="truncate font-mono text-xs text-white/80">
+            {getKeyName() || fingerprint(getKey()) || "—"}
           </div>
           {whoami && (
             <div className="mt-2 text-[11px] text-white/40">
               {whoami.qpus_visible} QPU · {whoami.backends_visible} backends
+              {whoami.api_version ? ` · ${whoami.api_version}` : ""}
             </div>
           )}
         </div>
         <button
           onClick={() => {
-            setKey("");
+            clearAuth();
             onLogout();
           }}
           className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-white/50 transition hover:bg-white/5 hover:text-white"

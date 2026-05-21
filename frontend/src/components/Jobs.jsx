@@ -157,7 +157,7 @@ export default function Jobs({ onPickJob }) {
                       {num(j.qubits)}
                     </td>
                     <td className="px-4 py-3 text-right text-white/50">
-                      {timeAgo(j.request || j.created_at)}
+                      {timeAgo(j.request_epoch || j.request)}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <ArrowRight size={14} className="inline text-white/30" />

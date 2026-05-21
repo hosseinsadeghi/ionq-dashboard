@@ -1,8 +1,12 @@
-// Thin wrapper around the FastAPI proxy. The IonQ key is held in localStorage
-// and forwarded on every call via the X-IonQ-Key header so it never appears
-// in the URL/query string and is never persisted server-side.
+// Thin wrapper around the FastAPI proxy.
+//
+// Two key-passing modes:
+//   - "manual": user pasted a raw key into the UI → forwarded via X-IonQ-Key.
+//   - "named":  user picked an env-loaded key → forwarded via X-IonQ-Key-Name.
+//               The actual value never leaves the server in this mode.
 
 const KEY_STORAGE = "ionq_api_key";
+const NAME_STORAGE = "ionq_api_key_name";
 
 export function getKey() {
   try {
@@ -21,18 +25,48 @@ export function setKey(value) {
   }
 }
 
+export function getKeyName() {
+  try {
+    return localStorage.getItem(NAME_STORAGE) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setKeyName(name) {
+  try {
+    if (name) localStorage.setItem(NAME_STORAGE, name);
+    else localStorage.removeItem(NAME_STORAGE);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearAuth() {
+  setKey("");
+  setKeyName("");
+}
+
+export function hasAnyKey() {
+  return Boolean(getKey() || getKeyName());
+}
+
 export function fingerprint(key) {
   if (!key) return "";
   if (key.length <= 8) return "•".repeat(key.length);
   return `${key.slice(0, 4)}…${key.slice(-4)}`;
 }
 
-async function call(path, { signal } = {}) {
+function authHeaders() {
+  const name = getKeyName();
+  if (name) return { "X-IonQ-Key-Name": name };
   const key = getKey();
-  const res = await fetch(path, {
-    headers: key ? { "X-IonQ-Key": key } : {},
-    signal,
-  });
+  if (key) return { "X-IonQ-Key": key };
+  return {};
+}
+
+async function call(path, { signal } = {}) {
+  const res = await fetch(path, { headers: authHeaders(), signal });
   let body = null;
   const text = await res.text();
   if (text) {
@@ -57,6 +91,7 @@ async function call(path, { signal } = {}) {
 
 export const api = {
   health: () => call("/api/health"),
+  keySources: () => call("/api/key-sources"),
   whoami: () => call("/api/whoami"),
   backends: () => call("/api/backends"),
   backend: (name) => call(`/api/backends/${encodeURIComponent(name)}`),

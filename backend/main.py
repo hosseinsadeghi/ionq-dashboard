@@ -1,42 +1,45 @@
 """IonQ Dashboard — backend proxy.
 
 The browser never talks to IonQ directly: every request is forwarded through
-this FastAPI app, with the IonQ API key supplied per-request in the
-``X-IonQ-Key`` header. Nothing is ever persisted server-side — the proxy
-is stateless, so it is safe to deploy this repo publicly.
+this FastAPI app. The IonQ API key arrives one of two ways:
 
-Exposed endpoints (all under /api):
+* ``X-IonQ-Key`` header — raw key, supplied by the browser (held only in
+  localStorage on the client).
+* ``X-IonQ-Key-Name`` header — name of an env var the *server* already knows
+  about. The actual key value never leaves the server in this mode.
 
-* GET  /api/health                         — sanity check (no key)
-* GET  /api/whoami                         — validates the key by hitting /backends
-* GET  /api/backends                       — list of all backends + status
-* GET  /api/backends/{name}                — single backend
-* GET  /api/characterizations/{backend}    — current characterization
-* GET  /api/characterizations/{backend}/history?limit=
-* GET  /api/jobs?status=&limit=&next=      — paginated job list
-* GET  /api/jobs/{id}                      — job detail
-* GET  /api/jobs/{id}/results              — job results (raw)
-* GET  /api/jobs/{id}/cost                 — cost record (when present)
-* GET  /api/summary                        — aggregated jobs/spend/queue overview
+At startup, the proxy scans a small set of well-known ``.env`` paths and
+exposes any ``IONQ_*`` entries it finds via ``/api/key-sources`` (returning
+only the variable name + fingerprint, never the value).
+
+We default to IonQ's ``/v0.4`` API, but many keys are only authorized on
+``/v0.3``. If the upstream returns 401/403 on ``/v0.4`` we automatically
+retry against ``/v0.3`` and pin that version for the rest of the session.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-IONQ_API_BASE = "https://api.ionq.co/v0.4"
+IONQ_HOST = "https://api.ionq.co"
+API_VERSIONS = ["v0.4", "v0.3"]
 HTTP_TIMEOUT = 20.0
 SUMMARY_PAGE_LIMIT = 250
 SUMMARY_MAX_PAGES = 8
 
-app = FastAPI(title="IonQ Dashboard Proxy", version="0.1.0")
+# Per-key sticky version cache so we don't re-probe on every call.
+_VERSION_CACHE: dict[str, str] = {}
+
+app = FastAPI(title="IonQ Dashboard Proxy", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,8 +50,110 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# Key-source discovery
+# ---------------------------------------------------------------------------
+
+# .env files searched at startup. Add more if you have a custom layout —
+# anything that isn't readable is silently skipped.
+ENV_SEARCH_PATHS: list[Path] = [
+    Path.cwd() / ".env",
+    Path(__file__).resolve().parent.parent / ".env",  # repo root
+    Path.home() / ".env",
+    Path.home() / ".config" / "qollab" / ".env",
+    # The sibling Quantum Advantage Lab project, where Hossein keeps his keys.
+    Path.home() / "projects" / "quantum_applications" / "quantum_advantage_lab" / ".env",
+]
+
+_KEY_NAME_RE = re.compile(r"^IONQ[A-Z0-9_]*KEY[A-Z0-9_]*$", re.IGNORECASE)
+
+# name → {"value": str, "source": str}
+_KEY_SOURCES: dict[str, dict[str, str]] = {}
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if not name or not _KEY_NAME_RE.match(name):
+            continue
+        value = value.strip()
+        if value and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        if value:
+            out[name] = value
+    return out
+
+
+def _load_key_sources() -> None:
+    _KEY_SOURCES.clear()
+    # Process env first so a .env value can override only if env is empty.
+    for name, val in os.environ.items():
+        if _KEY_NAME_RE.match(name) and val:
+            _KEY_SOURCES[name] = {"value": val, "source": "environment"}
+    for path in ENV_SEARCH_PATHS:
+        if not path.is_file():
+            continue
+        for name, val in _parse_env_file(path).items():
+            # First .env wins to keep ordering stable.
+            if name not in _KEY_SOURCES:
+                _KEY_SOURCES[name] = {"value": val, "source": str(path)}
+
+
+_load_key_sources()
+
+
+# ---------------------------------------------------------------------------
 # Low-level IonQ helper
 # ---------------------------------------------------------------------------
+
+
+def _fingerprint(key: str) -> str:
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "•" * len(key)
+    return f"{key[:4]}…{key[-4:]}"
+
+
+def _normalize_key(value: str) -> str:
+    key = (value or "").strip()
+    for prefix in ("apiKey ", "Bearer ", "apikey ", "ApiKey ", "Token "):
+        if key.startswith(prefix):
+            key = key[len(prefix):].strip()
+    return key
+
+
+def require_key(
+    x_ionq_key: str | None,
+    x_ionq_key_name: str | None,
+) -> str:
+    if x_ionq_key_name:
+        entry = _KEY_SOURCES.get(x_ionq_key_name)
+        if not entry:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no key named {x_ionq_key_name!r} on the server",
+            )
+        return _normalize_key(entry["value"])
+    if x_ionq_key:
+        key = _normalize_key(x_ionq_key)
+        if key:
+            return key
+    # Last resort: process env.
+    env_key = _normalize_key(os.environ.get("IONQ_API_KEY") or "")
+    if env_key:
+        return env_key
+    raise HTTPException(status_code=401, detail="missing IonQ API key")
 
 
 async def ionq_get(
@@ -58,28 +163,53 @@ async def ionq_get(
     params: dict[str, Any] | None = None,
     allow_404: bool = False,
 ) -> Any:
-    if not api_key:
-        raise HTTPException(status_code=401, detail="missing IonQ API key")
+    """GET <api_base><path>. Auto-falls back from v0.4 → v0.3 on auth failure."""
     headers = {"Authorization": f"apiKey {api_key}"}
-    url = f"{IONQ_API_BASE}{path}"
+    cached = _VERSION_CACHE.get(api_key)
+    versions = [cached] if cached else list(API_VERSIONS)
+
+    last_resp: httpx.Response | None = None
+    last_version = versions[0]
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        try:
-            resp = await client.get(url, headers=headers, params=params)
-        except httpx.RequestError as exc:
-            raise HTTPException(status_code=502, detail=f"IonQ unreachable: {exc}") from exc
-    if resp.status_code == 401 or resp.status_code == 403:
-        raise HTTPException(status_code=401, detail="IonQ rejected API key")
+        for version in versions:
+            url = f"{IONQ_HOST}/{version}{path}"
+            try:
+                resp = await client.get(url, headers=headers, params=params)
+            except httpx.RequestError as exc:
+                raise HTTPException(status_code=502, detail=f"IonQ unreachable: {exc}") from exc
+            last_resp = resp
+            last_version = version
+            if resp.status_code in (401, 403) and not cached and len(versions) > 1:
+                # Try the next version.
+                continue
+            # Successful or non-auth failure → pin this version.
+            if resp.status_code < 400:
+                _VERSION_CACHE[api_key] = version
+            break
+
+    assert last_resp is not None
+    resp = last_resp
     if resp.status_code == 404 and allow_404:
         return None
     if resp.status_code >= 400:
-        # Try to surface IonQ's error body — useful when debugging.
         try:
             body = resp.json()
         except Exception:  # noqa: BLE001
-            body = resp.text
+            body = resp.text or None
         raise HTTPException(
             status_code=resp.status_code,
-            detail={"upstream": body, "path": path},
+            detail={
+                "upstream_status": resp.status_code,
+                "upstream_body": body,
+                "path": path,
+                "api_version": last_version,
+                "hint": (
+                    "IonQ rejected the key on both v0.4 and v0.3. "
+                    "Confirm the key at cloud.ionq.com/settings/keys."
+                )
+                if resp.status_code in (401, 403)
+                else None,
+            },
         )
     if not resp.content:
         return None
@@ -89,13 +219,6 @@ async def ionq_get(
         return resp.text
 
 
-def require_key(x_ionq_key: str | None) -> str:
-    key = x_ionq_key or os.environ.get("IONQ_API_KEY") or ""
-    if not key:
-        raise HTTPException(status_code=401, detail="missing IonQ API key")
-    return key
-
-
 # ---------------------------------------------------------------------------
 # Public endpoints
 # ---------------------------------------------------------------------------
@@ -103,18 +226,45 @@ def require_key(x_ionq_key: str | None) -> str:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "ionq-dashboard-proxy", "ionq_base": IONQ_API_BASE}
+    return {
+        "ok": True,
+        "service": "ionq-dashboard-proxy",
+        "ionq_host": IONQ_HOST,
+        "api_versions": API_VERSIONS,
+        "known_keys": len(_KEY_SOURCES),
+    }
+
+
+@app.get("/api/key-sources")
+async def key_sources() -> dict[str, Any]:
+    """List discoverable IonQ keys WITHOUT exposing values."""
+    _load_key_sources()  # cheap; lets users edit .env without restart
+    items = [
+        {
+            "name": name,
+            "fingerprint": _fingerprint(entry["value"]),
+            "source": entry["source"],
+        }
+        for name, entry in _KEY_SOURCES.items()
+    ]
+    # Stable order: IONQ_API_KEY first (the conventional default), then alpha.
+    items.sort(key=lambda x: (x["name"] != "IONQ_API_KEY", x["name"]))
+    return {"sources": items}
 
 
 @app.get("/api/whoami")
-async def whoami(x_ionq_key: str | None = Header(default=None)) -> dict[str, Any]:
-    """Validate the key by hitting /backends — cheapest authenticated endpoint."""
-    key = require_key(x_ionq_key)
+async def whoami(
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
+) -> dict[str, Any]:
+    key = require_key(x_ionq_key, x_ionq_key_name)
     data = await ionq_get("/backends", key)
     backends = _normalize_backends(data)
     return {
         "valid": True,
         "key_fingerprint": _fingerprint(key),
+        "key_name": x_ionq_key_name,
+        "api_version": _VERSION_CACHE.get(key),
         "backends_visible": len(backends),
         "qpus_visible": sum(1 for b in backends if b["name"].startswith("qpu.")),
         "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -122,23 +272,32 @@ async def whoami(x_ionq_key: str | None = Header(default=None)) -> dict[str, Any
 
 
 @app.get("/api/backends")
-async def backends(x_ionq_key: str | None = Header(default=None)) -> Any:
-    key = require_key(x_ionq_key)
+async def backends(
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
+) -> Any:
+    key = require_key(x_ionq_key, x_ionq_key_name)
     data = await ionq_get("/backends", key)
     return {"backends": _normalize_backends(data)}
 
 
 @app.get("/api/backends/{name}")
-async def backend_detail(name: str, x_ionq_key: str | None = Header(default=None)) -> Any:
-    key = require_key(x_ionq_key)
+async def backend_detail(
+    name: str,
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
+) -> Any:
+    key = require_key(x_ionq_key, x_ionq_key_name)
     return await ionq_get(f"/backends/{name}", key)
 
 
 @app.get("/api/characterizations/{backend}")
 async def characterization(
-    backend: str, x_ionq_key: str | None = Header(default=None)
+    backend: str,
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
 ) -> Any:
-    key = require_key(x_ionq_key)
+    key = require_key(x_ionq_key, x_ionq_key_name)
     return await ionq_get(f"/characterizations/backends/{backend}/current", key)
 
 
@@ -147,8 +306,9 @@ async def characterization_history(
     backend: str,
     limit: int = Query(default=20, ge=1, le=100),
     x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
 ) -> Any:
-    key = require_key(x_ionq_key)
+    key = require_key(x_ionq_key, x_ionq_key_name)
     return await ionq_get(
         f"/characterizations/backends/{backend}",
         key,
@@ -162,44 +322,62 @@ async def jobs(
     limit: int = Query(default=50, ge=1, le=250),
     next: str | None = None,
     x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
 ) -> Any:
-    key = require_key(x_ionq_key)
+    key = require_key(x_ionq_key, x_ionq_key_name)
     params: dict[str, Any] = {"limit": limit}
     if status:
         params["status"] = status
     if next:
         params["next"] = next
-    return await ionq_get("/jobs", key, params=params)
+    payload = await ionq_get("/jobs", key, params=params)
+    # Normalize every job so the frontend has a consistent shape.
+    if isinstance(payload, dict):
+        payload["jobs"] = [_normalize_job(j) for j in payload.get("jobs") or []]
+    return payload
 
 
 @app.get("/api/jobs/{job_id}")
-async def job_detail(job_id: str, x_ionq_key: str | None = Header(default=None)) -> Any:
-    key = require_key(x_ionq_key)
-    return await ionq_get(f"/jobs/{job_id}", key)
+async def job_detail(
+    job_id: str,
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
+) -> Any:
+    key = require_key(x_ionq_key, x_ionq_key_name)
+    raw = await ionq_get(f"/jobs/{job_id}", key)
+    return _normalize_job(raw, include_raw=True) if isinstance(raw, dict) else raw
 
 
 @app.get("/api/jobs/{job_id}/results")
-async def job_results(job_id: str, x_ionq_key: str | None = Header(default=None)) -> Any:
-    key = require_key(x_ionq_key)
+async def job_results(
+    job_id: str,
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
+) -> Any:
+    key = require_key(x_ionq_key, x_ionq_key_name)
     return await ionq_get(f"/jobs/{job_id}/results", key, allow_404=True)
 
 
 @app.get("/api/jobs/{job_id}/cost")
-async def job_cost(job_id: str, x_ionq_key: str | None = Header(default=None)) -> Any:
-    key = require_key(x_ionq_key)
+async def job_cost(
+    job_id: str,
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
+) -> Any:
+    key = require_key(x_ionq_key, x_ionq_key_name)
     return await ionq_get(f"/jobs/{job_id}/cost", key, allow_404=True)
 
 
 @app.get("/api/summary")
-async def summary(x_ionq_key: str | None = Header(default=None)) -> dict[str, Any]:
-    """Aggregate jobs across pages to compute spend totals, status counts, etc."""
-    key = require_key(x_ionq_key)
+async def summary(
+    x_ionq_key: str | None = Header(default=None),
+    x_ionq_key_name: str | None = Header(default=None),
+) -> dict[str, Any]:
+    key = require_key(x_ionq_key, x_ionq_key_name)
 
-    # Fetch backends in parallel-ish (single call, cheap).
     backends_payload = await ionq_get("/backends", key)
     backends_norm = _normalize_backends(backends_payload)
 
-    # Page through jobs (bounded so a heavy account doesn't hang the dashboard).
     all_jobs: list[dict[str, Any]] = []
     next_token: str | None = None
     for _ in range(SUMMARY_MAX_PAGES):
@@ -210,12 +388,12 @@ async def summary(x_ionq_key: str | None = Header(default=None)) -> dict[str, An
         if not isinstance(page, dict):
             break
         jobs_page = page.get("jobs") or []
-        all_jobs.extend(jobs_page)
+        all_jobs.extend(_normalize_job(j) for j in jobs_page if isinstance(j, dict))
         next_token = page.get("next")
         if not next_token or not jobs_page:
             break
 
-    return _aggregate_summary(all_jobs, backends_norm, truncated=next_token is not None)
+    return _aggregate_summary(all_jobs, backends_norm, truncated=bool(next_token))
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +402,6 @@ async def summary(x_ionq_key: str | None = Header(default=None)) -> dict[str, An
 
 
 def _normalize_backends(payload: Any) -> list[dict[str, Any]]:
-    """IonQ returns a bare list for /backends; wrap consistently."""
     if isinstance(payload, list):
         items = payload
     elif isinstance(payload, dict):
@@ -245,9 +422,68 @@ def _normalize_backends(payload: Any) -> list[dict[str, Any]]:
                 "has_access": item.get("has_access"),
                 "characterization_url": item.get("characterization_url"),
                 "degraded": item.get("degraded"),
+                "location": item.get("location"),
+                "supported_gates": item.get("supported_gates"),
+                "supported_native_gates": item.get("supported_native_gates"),
+                "supported_error_mitigations": item.get("supported_error_mitigations"),
                 "raw": item,
             }
         )
+    return out
+
+
+def _normalize_job(job: dict[str, Any], *, include_raw: bool = False) -> dict[str, Any]:
+    """Smooth over v0.3 / v0.4 differences so the frontend has one shape."""
+    if not isinstance(job, dict):
+        return job
+
+    backend = job.get("backend") or job.get("target") or "unknown"
+    shots = job.get("shots")
+    metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    if shots is None and metadata:
+        ms = metadata.get("shots")
+        if ms is not None:
+            try:
+                shots = int(ms)
+            except (TypeError, ValueError):
+                shots = None
+
+    cost = _coerce_cost(job)
+
+    created = job.get("request") or job.get("created_at") or job.get("requested_at")
+    completed = job.get("response") or job.get("completed_at")
+
+    out = {
+        "id": job.get("id"),
+        "name": job.get("name"),
+        "status": job.get("status") or "unknown",
+        "backend": backend,
+        "target": job.get("target"),
+        "type": job.get("type"),
+        "shots": shots,
+        "qubits": job.get("qubits"),
+        "circuits": job.get("circuits"),
+        "gate_counts": job.get("gate_counts"),
+        "cost_model": job.get("cost_model"),
+        "cost_usd": job.get("cost_usd"),
+        "cost": cost,
+        "predicted_cost": job.get("predicted_cost"),
+        "execution_time": job.get("execution_time"),
+        "predicted_execution_time": job.get("predicted_execution_time"),
+        "cost_billable_time_us": job.get("cost_billable_time_us"),
+        "project_id": job.get("project_id"),
+        "submitted_by": job.get("submitted_by"),
+        "error_mitigation": job.get("error_mitigation"),
+        "noise": job.get("noise"),
+        "dry_run": job.get("dry_run"),
+        "request": _to_iso(created),
+        "response": _to_iso(completed),
+        "request_epoch": created,
+        "response_epoch": completed,
+        "children": job.get("children"),
+    }
+    if include_raw:
+        out["raw"] = job
     return out
 
 
@@ -268,63 +504,34 @@ def _aggregate_summary(
     failed = 0
 
     recent: list[dict[str, Any]] = []
-
     for job in jobs_list:
-        if not isinstance(job, dict):
-            continue
-        status = job.get("status") or "unknown"
-        backend = job.get("backend") or job.get("target") or "unknown"
+        status = job["status"]
+        backend = job["backend"]
         status_counts[status] += 1
         backend_counts[backend] += 1
-
-        cost = _coerce_cost(job)
+        cost = job.get("cost")
         if cost is not None:
             total_spend += cost
             backend_spend[backend] += cost
-
         shots = job.get("shots")
         if isinstance(shots, (int, float)):
             total_shots += int(shots)
-
         if status == "completed":
             completed += 1
         elif status in {"failed", "canceled", "cancelled"}:
             failed += 1
-
-        created = job.get("request") or job.get("created_at") or job.get("requested_at")
-        day = _iso_day(created)
+        day = _iso_day(job.get("request_epoch") or job.get("request"))
         if day:
             daily_jobs[day] += 1
             if cost is not None:
                 daily_spend[day] += cost
+        recent.append(job)
 
-        recent.append(
-            {
-                "id": job.get("id"),
-                "name": job.get("name"),
-                "status": status,
-                "backend": backend,
-                "shots": shots,
-                "qubits": job.get("qubits"),
-                "gate_counts": job.get("gate_counts"),
-                "created": created,
-                "completed": job.get("response") or job.get("completed_at"),
-                "execution_time": job.get("execution_time"),
-                "predicted_execution_time": job.get("predicted_execution_time"),
-                "cost": cost,
-                "error_mitigation": job.get("error_mitigation"),
-                "noise_model": job.get("noise"),
-            }
-        )
-
-    # Sort recent by created desc
-    recent.sort(key=lambda j: j.get("created") or "", reverse=True)
-
+    recent.sort(key=lambda j: (j.get("request_epoch") or 0), reverse=True)
     daily_series = [
         {"day": d, "spend": round(daily_spend.get(d, 0.0), 4), "jobs": daily_jobs[d]}
         for d in sorted(daily_jobs.keys())
     ]
-
     return {
         "totals": {
             "jobs_seen": len(jobs_list),
@@ -344,8 +551,7 @@ def _aggregate_summary(
 
 
 def _coerce_cost(job: dict[str, Any]) -> float | None:
-    """IonQ exposes cost in a couple of shapes — coerce to USD float."""
-    for key in ("cost", "actual_cost", "predicted_cost"):
+    for key in ("cost_usd", "cost", "actual_cost", "predicted_cost"):
         val = job.get(key)
         if val is None:
             continue
@@ -368,13 +574,28 @@ def _coerce_cost(job: dict[str, Any]) -> float | None:
     return None
 
 
+def _to_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:
+            ts /= 1000.0
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        return value
+    return None
+
+
 def _iso_day(value: Any) -> str | None:
     if value is None:
         return None
-    # IonQ uses ISO-8601 strings; also tolerate epoch seconds/ms.
     if isinstance(value, (int, float)):
         ts = float(value)
-        if ts > 1e12:  # ms
+        if ts > 1e12:
             ts /= 1000.0
         try:
             return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
@@ -387,9 +608,3 @@ def _iso_day(value: Any) -> str | None:
         except ValueError:
             return value[:10] if len(value) >= 10 else None
     return None
-
-
-def _fingerprint(key: str) -> str:
-    if len(key) <= 8:
-        return "•" * len(key)
-    return f"{key[:4]}…{key[-4:]}"
