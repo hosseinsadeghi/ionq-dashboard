@@ -60,8 +60,6 @@ ENV_SEARCH_PATHS: list[Path] = [
     Path(__file__).resolve().parent.parent / ".env",  # repo root
     Path.home() / ".env",
     Path.home() / ".config" / "qollab" / ".env",
-    # The sibling Quantum Advantage Lab project, where Hossein keeps his keys.
-    Path.home() / "projects" / "quantum_applications" / "quantum_advantage_lab" / ".env",
 ]
 
 _KEY_NAME_RE = re.compile(r"^IONQ[A-Z0-9_]*KEY[A-Z0-9_]*$", re.IGNORECASE)

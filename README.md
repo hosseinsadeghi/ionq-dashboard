@@ -192,8 +192,6 @@ value itself never leaves the server.
 - `./.env` in the dashboard repo root
 - `~/.env`
 - `~/.config/qollab/.env`
-- `~/projects/quantum_applications/quantum_advantage_lab/.env`
-  *(legacy path for the original Qollab QAL project — harmless if absent)*
 
 To add your own location, edit `ENV_SEARCH_PATHS` near the top of
 `backend/main.py`.
