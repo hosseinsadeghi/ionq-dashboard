@@ -105,19 +105,15 @@ export default function JobDetail({ jobId, onBack }) {
               <KV label="Shots" value={num(job.shots)} />
               <KV label="Qubits" value={num(job.qubits)} />
               <KV
-                label={job.cost_is_quote ? "Cost (quoted)" : "Cost (billed)"}
+                label={costLabel(job.cost_status)}
                 value={usd(
                   (typeof cost === "object" && (cost?.amount || cost?.usd)) ||
                     job.cost ||
                     job.actual_cost
                 )}
-                accent={!job.cost_is_quote}
-                muted={job.cost_is_quote}
-                hint={
-                  job.cost_is_quote
-                    ? "Submission-time quote under quantum_compute_time. Not necessarily charged."
-                    : undefined
-                }
+                accent={job.cost_status === "billed"}
+                muted={job.cost_status !== "billed"}
+                hint={costHint(job.cost_status)}
               />
               <KV
                 label="Predicted cost"
@@ -188,6 +184,22 @@ export default function JobDetail({ jobId, onBack }) {
       )}
     </div>
   );
+}
+
+function costLabel(status) {
+  if (status === "billed") return "Cost (billed)";
+  if (status === "pending") return "Cost (pending)";
+  if (status === "canceled") return "Cost (voided)";
+  return "Cost";
+}
+
+function costHint(status) {
+  if (status === "billed") return "Actual amount IonQ charged for this run.";
+  if (status === "pending")
+    return "IonQ's submission-time quote. Will become a real charge if the job executes.";
+  if (status === "canceled")
+    return "IonQ's quote stays attached for reference, but canceled/failed jobs are normally not charged.";
+  return undefined;
 }
 
 function KV({ label, value, accent, muted, hint }) {

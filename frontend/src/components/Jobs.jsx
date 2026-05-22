@@ -159,7 +159,7 @@ export default function Jobs({ onPickJob }) {
                       {num(j.qubits)}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <CostCell cost={j.cost} isQuote={j.cost_is_quote} />
+                      <CostCell cost={j.cost} status={j.cost_status} />
                     </td>
                     <td className="px-4 py-3 text-right text-white/50">
                       {timeAgo(j.request_epoch || j.request)}

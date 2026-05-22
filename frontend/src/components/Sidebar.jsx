@@ -3,9 +3,8 @@ import {
   Server,
   Activity,
   ListChecks,
-  LogOut,
 } from "lucide-react";
-import { fingerprint, getKey, getKeyName, clearAuth } from "../lib/api.js";
+import KeyPicker from "./KeyPicker.jsx";
 
 const NAV = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -14,9 +13,9 @@ const NAV = [
   { id: "calibration", label: "Calibration", icon: Activity },
 ];
 
-export default function Sidebar({ view, setView, onLogout, whoami }) {
+export default function Sidebar({ view, setView, onKeyChange }) {
   return (
-    <aside className="hidden w-60 shrink-0 flex-col border-r border-white/5 bg-ink-900/60 p-4 md:flex">
+    <aside className="hidden w-64 shrink-0 flex-col border-r border-white/5 bg-ink-900/60 p-4 md:flex">
       <div className="mb-6 flex items-center gap-2.5 px-2">
         <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-accent-violet to-accent-cyan shadow-glow">
           <div className="h-3.5 w-3.5 rounded-full bg-ink-950" />
@@ -48,27 +47,7 @@ export default function Sidebar({ view, setView, onLogout, whoami }) {
       </nav>
 
       <div className="mt-auto">
-        <div className="glass mb-3 p-3">
-          <div className="label mb-1">Active key</div>
-          <div className="truncate font-mono text-xs text-white/80">
-            {getKeyName() || fingerprint(getKey()) || "—"}
-          </div>
-          {whoami && (
-            <div className="mt-2 text-[11px] text-white/40">
-              {whoami.qpus_visible} QPU · {whoami.backends_visible} backends
-              {whoami.api_version ? ` · ${whoami.api_version}` : ""}
-            </div>
-          )}
-        </div>
-        <button
-          onClick={() => {
-            clearAuth();
-            onLogout();
-          }}
-          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-white/50 transition hover:bg-white/5 hover:text-white"
-        >
-          <LogOut size={15} /> Forget key
-        </button>
+        <KeyPicker onChange={onKeyChange} />
       </div>
     </aside>
   );

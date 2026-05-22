@@ -21,7 +21,7 @@ import {
   Cell,
   Legend,
 } from "recharts";
-import { api } from "../lib/api.js";
+import { api, hasAnyKey } from "../lib/api.js";
 import { usd, num, dur, timeAgo, statusClass } from "../lib/format.js";
 import CostCell from "./CostCell.jsx";
 
@@ -59,6 +59,7 @@ export default function Overview({ onPickJob }) {
     load();
   }, []);
 
+  if (!hasAnyKey()) return <NoKey />;
   if (loading && !data) return <LoadingSkeleton />;
   if (error)
     return (
@@ -75,12 +76,14 @@ export default function Overview({ onPickJob }) {
       name: shortBackend(name),
       jobs: value,
       billed: data.backend_billed_usd?.[name] || 0,
-      quoted: data.backend_quoted_usd?.[name] || 0,
+      pending: data.backend_pending_usd?.[name] || 0,
+      canceled: data.backend_canceled_usd?.[name] || 0,
     }))
-    .sort(
-      (a, b) =>
-        b.billed + b.quoted - (a.billed + a.quoted) || b.jobs - a.jobs
-    );
+    .sort((a, b) => {
+      const ta = a.billed + a.pending + a.canceled;
+      const tb = b.billed + b.pending + b.canceled;
+      return tb - ta || b.jobs - a.jobs;
+    });
 
   return (
     <div className="space-y-5">
@@ -99,14 +102,22 @@ export default function Overview({ onPickJob }) {
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          label="Billed"
+          label="Spend"
           value={
             <span className="text-accent-mint">
               {usd(t.billed_spend_usd)}
             </span>
           }
-          sub={`completed jobs only · quoted ${usd(t.quoted_spend_usd)}`}
-          subTitle="Cost only confirmed for jobs with status=completed. Other rows show IonQ's submission-time quote, which is not necessarily billed."
+          sub={
+            <span>
+              billed ·{" "}
+              <span className="text-accent-amber">{usd(t.pending_spend_usd)}</span>{" "}
+              pending ·{" "}
+              <span className="text-white/40">{usd(t.canceled_spend_usd)}</span>{" "}
+              voided
+            </span>
+          }
+          subTitle="Billed: actually charged (status=completed). Pending: in-flight jobs whose quote will become real if they run. Voided: canceled/failed jobs, normally not charged."
           icon={Coins}
           tint="from-accent-mint/30 to-transparent"
         />
@@ -138,7 +149,8 @@ export default function Overview({ onPickJob }) {
             <div className="text-sm font-semibold">Daily activity</div>
             <div className="flex items-center gap-3 text-[11px] text-white/40">
               <Swatch color="#34d399" label="billed" />
-              <Swatch color="#a78bfa" label="quoted" />
+              <Swatch color="#f59e0b" label="pending" />
+              <Swatch color="#52576b" label="voided" />
               <Swatch color="#22d3ee" label="jobs (count)" />
             </div>
           </div>
@@ -166,9 +178,15 @@ export default function Overview({ onPickJob }) {
                   radius={[0, 0, 0, 0]}
                 />
                 <Bar
-                  dataKey="quoted"
+                  dataKey="pending"
                   stackId="cost"
-                  fill="#a78bfa"
+                  fill="#f59e0b"
+                  radius={[0, 0, 0, 0]}
+                />
+                <Bar
+                  dataKey="canceled"
+                  stackId="cost"
+                  fill="#52576b"
                   radius={[4, 4, 0, 0]}
                 />
                 <Bar dataKey="jobs" fill="#22d3ee" radius={[4, 4, 0, 0]} />
@@ -253,7 +271,7 @@ export default function Overview({ onPickJob }) {
                     </td>
                     <td className="py-2.5 pr-3 text-right tabular-nums">{num(j.shots)}</td>
                     <td className="py-2.5 pr-3 text-right">
-                      <CostCell cost={j.cost} isQuote={j.cost_is_quote} />
+                      <CostCell cost={j.cost} status={j.cost_status} />
                     </td>
                     <td className="py-2.5 pr-3 text-right text-white/50">{timeAgo(j.request_epoch || j.request)}</td>
                   </tr>
@@ -273,7 +291,8 @@ export default function Overview({ onPickJob }) {
             <div className="text-sm font-semibold">Spend by backend</div>
             <div className="flex items-center gap-2 text-[10px] text-white/40">
               <Swatch color="#34d399" label="billed" />
-              <Swatch color="#a78bfa" label="quoted" />
+              <Swatch color="#f59e0b" label="pending" />
+              <Swatch color="#52576b" label="voided" />
             </div>
           </div>
           <div className="space-y-3">
@@ -283,19 +302,27 @@ export default function Overview({ onPickJob }) {
             {backendData.map((b) => {
               const max =
                 Math.max(
-                  ...backendData.map((x) => (x.billed || 0) + (x.quoted || 0))
+                  ...backendData.map(
+                    (x) => (x.billed || 0) + (x.pending || 0) + (x.canceled || 0)
+                  )
                 ) || 1;
-              const billedPct = (b.billed / max) * 100;
-              const quotedPct = (b.quoted / max) * 100;
+              const seg = (v) => (v / max) * 100;
               return (
                 <div key={b.name}>
                   <div className="mb-1 flex justify-between text-xs">
                     <span className="text-white/70">{b.name}</span>
                     <span className="tabular-nums text-white/50">
-                      <span className="text-accent-mint">{usd(b.billed)}</span>
-                      {b.quoted > 0 && (
+                      {b.billed > 0 && (
+                        <span className="text-accent-mint">{usd(b.billed)}</span>
+                      )}
+                      {b.pending > 0 && (
                         <>
-                          {" "}+ <span className="text-accent-violet">{usd(b.quoted)}</span>
+                          {" "}+ <span className="text-accent-amber">{usd(b.pending)}</span>
+                        </>
+                      )}
+                      {b.canceled > 0 && (
+                        <>
+                          {" "}+ <span className="text-white/40">{usd(b.canceled)}</span>
                         </>
                       )}
                       <span className="text-white/30"> · {num(b.jobs)}j</span>
@@ -305,13 +332,19 @@ export default function Overview({ onPickJob }) {
                     {b.billed > 0 && (
                       <div
                         className="h-full bg-accent-mint"
-                        style={{ width: `${billedPct}%` }}
+                        style={{ width: `${seg(b.billed)}%` }}
                       />
                     )}
-                    {b.quoted > 0 && (
+                    {b.pending > 0 && (
                       <div
-                        className="h-full bg-accent-violet/70"
-                        style={{ width: `${quotedPct}%` }}
+                        className="h-full bg-accent-amber"
+                        style={{ width: `${seg(b.pending)}%` }}
+                      />
+                    )}
+                    {b.canceled > 0 && (
+                      <div
+                        className="h-full bg-white/30"
+                        style={{ width: `${seg(b.canceled)}%` }}
                       />
                     )}
                   </div>
@@ -371,6 +404,23 @@ function LoadingSkeleton() {
         ))}
       </div>
       <div className="skeleton h-72" />
+    </div>
+  );
+}
+
+function NoKey() {
+  return (
+    <div className="glass flex flex-col items-center gap-3 p-12 text-center">
+      <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-accent-violet/30 to-accent-cyan/20">
+        <div className="h-4 w-4 rounded-full bg-ink-950" />
+      </div>
+      <div>
+        <div className="text-base font-semibold">No IonQ key selected</div>
+        <p className="mt-1 text-sm text-white/40">
+          Pick a key from the sidebar — server-loaded entries appear
+          automatically, or paste one in.
+        </p>
+      </div>
     </div>
   );
 }

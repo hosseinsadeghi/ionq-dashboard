@@ -491,13 +491,38 @@ def _normalize_job(job: dict[str, Any], *, include_raw: bool = False) -> dict[st
         "response_epoch": completed,
         "children": job.get("children"),
         # IonQ populates cost_usd at submission as a deterministic quote under
-        # the quantum_compute_time model. Until a job is "completed" the
-        # number is a quote, not a settled charge.
-        "cost_is_quote": (job.get("status") or "unknown") != "completed",
+        # the quantum_compute_time model. We classify the cost into three
+        # buckets so the UI can tell "going to be charged" from "won't be
+        # charged" from "already charged":
+        #   billed     - status=completed; the cost_usd reflects what was
+        #                actually billed (or $0 for the free simulator).
+        #   pending    - job is in flight (submitted/ready/running/queued).
+        #                The quote will become a real charge if it executes.
+        #   canceled   - canceled or failed; the quote is almost certainly
+        #                not actually charged (IonQ only bills on Forte if
+        #                cancel lands after slot reservation).
+        "cost_status": _classify_cost(job.get("status")),
+        # Back-compat alias: True for anything other than billed.
+        "cost_is_quote": _classify_cost(job.get("status")) != "billed",
     }
     if include_raw:
         out["raw"] = job
     return out
+
+
+_PENDING_STATUSES = {"submitted", "ready", "running", "queued"}
+_CANCELED_STATUSES = {"canceled", "cancelled", "failed"}
+
+
+def _classify_cost(status: str | None) -> str:
+    s = (status or "").lower()
+    if s == "completed":
+        return "billed"
+    if s in _PENDING_STATUSES:
+        return "pending"
+    if s in _CANCELED_STATUSES:
+        return "canceled"
+    return "pending"  # safest default for unknown statuses
 
 
 def _aggregate_summary(
@@ -506,67 +531,80 @@ def _aggregate_summary(
     *,
     truncated: bool,
 ) -> dict[str, Any]:
+    BUCKETS = ("billed", "pending", "canceled")
     status_counts: dict[str, int] = defaultdict(int)
     backend_counts: dict[str, int] = defaultdict(int)
-    backend_billed: dict[str, float] = defaultdict(float)
-    backend_quoted: dict[str, float] = defaultdict(float)
-    daily_billed: dict[str, float] = defaultdict(float)
-    daily_quoted: dict[str, float] = defaultdict(float)
+    bucket_totals = {b: 0.0 for b in BUCKETS}
+    backend_by_bucket: dict[str, dict[str, float]] = {
+        b: defaultdict(float) for b in BUCKETS
+    }
+    daily_by_bucket: dict[str, dict[str, float]] = {
+        b: defaultdict(float) for b in BUCKETS
+    }
     daily_jobs: dict[str, int] = defaultdict(int)
-    billed_spend = 0.0
-    quoted_spend = 0.0
     total_shots = 0
     completed = 0
     failed = 0
 
     recent: list[dict[str, Any]] = []
     for job in jobs_list:
-        status = job["status"]
-        backend = job["backend"]
+        if not isinstance(job, dict):
+            continue
+        status = job.get("status") or "unknown"
+        backend = job.get("backend") or "unknown"
+        bucket = job.get("cost_status") or _classify_cost(status)
         status_counts[status] += 1
         backend_counts[backend] += 1
+
         cost = job.get("cost")
-        is_quote = job.get("cost_is_quote", status != "completed")
         if cost is not None:
-            if is_quote:
-                quoted_spend += cost
-                backend_quoted[backend] += cost
-            else:
-                billed_spend += cost
-                backend_billed[backend] += cost
+            bucket_totals[bucket] += cost
+            backend_by_bucket[bucket][backend] += cost
+
         shots = job.get("shots")
         if isinstance(shots, (int, float)):
             total_shots += int(shots)
         if status == "completed":
             completed += 1
-        elif status in {"failed", "canceled", "cancelled"}:
+        elif status in _CANCELED_STATUSES:
             failed += 1
+
         day = _iso_day(job.get("request_epoch") or job.get("request"))
         if day:
             daily_jobs[day] += 1
             if cost is not None:
-                if is_quote:
-                    daily_quoted[day] += cost
-                else:
-                    daily_billed[day] += cost
+                daily_by_bucket[bucket][day] += cost
         recent.append(job)
 
     recent.sort(key=lambda j: (j.get("request_epoch") or 0), reverse=True)
+
     daily_series = [
         {
             "day": d,
-            "billed": round(daily_billed.get(d, 0.0), 4),
-            "quoted": round(daily_quoted.get(d, 0.0), 4),
             "jobs": daily_jobs[d],
+            **{b: round(daily_by_bucket[b].get(d, 0.0), 4) for b in BUCKETS},
         }
         for d in sorted(daily_jobs.keys())
     ]
+
+    all_backend_names = set().union(*(set(m) for m in backend_by_bucket.values()))
+    backend_by_bucket_out = {
+        b: {k: round(backend_by_bucket[b].get(k, 0.0), 4) for k in all_backend_names}
+        for b in BUCKETS
+    }
+
     return {
         "totals": {
             "jobs_seen": len(jobs_list),
-            "billed_spend_usd": round(billed_spend, 4),
-            "quoted_spend_usd": round(quoted_spend, 4),
-            "total_spend_usd": round(billed_spend + quoted_spend, 4),
+            "billed_spend_usd": round(bucket_totals["billed"], 4),
+            "pending_spend_usd": round(bucket_totals["pending"], 4),
+            "canceled_spend_usd": round(bucket_totals["canceled"], 4),
+            # legacy: sum of all three (was previously billed+everything-else)
+            "total_spend_usd": round(sum(bucket_totals.values()), 4),
+            # legacy alias for the old field
+            "quoted_spend_usd": round(
+                bucket_totals["pending"] + bucket_totals["canceled"], 4
+            ),
             "total_shots": total_shots,
             "completed": completed,
             "failed_or_canceled": failed,
@@ -574,12 +612,15 @@ def _aggregate_summary(
         },
         "status_counts": dict(status_counts),
         "backend_counts": dict(backend_counts),
-        "backend_billed_usd": {k: round(v, 4) for k, v in backend_billed.items()},
-        "backend_quoted_usd": {k: round(v, 4) for k, v in backend_quoted.items()},
-        # legacy key retained so existing clients don't break — equals billed+quoted
+        "backend_billed_usd": backend_by_bucket_out["billed"],
+        "backend_pending_usd": backend_by_bucket_out["pending"],
+        "backend_canceled_usd": backend_by_bucket_out["canceled"],
+        # legacy aggregate (billed + pending + canceled)
         "backend_spend_usd": {
-            k: round(backend_billed.get(k, 0) + backend_quoted.get(k, 0), 4)
-            for k in set(backend_billed) | set(backend_quoted)
+            k: round(
+                sum(backend_by_bucket[b].get(k, 0.0) for b in BUCKETS), 4
+            )
+            for k in all_backend_names
         },
         "daily": daily_series,
         "recent_jobs": recent[:50],

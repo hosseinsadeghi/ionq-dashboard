@@ -1,27 +1,48 @@
 import { usd } from "../lib/format.js";
 
-// IonQ populates cost_usd at submission as a deterministic quote under the
-// quantum_compute_time model. It only becomes a settled charge once the job
-// is "completed" — for any other status the same number is a quote that
-// IonQ may never have actually invoiced.
-export default function CostCell({ cost, isQuote }) {
+// Three states match the backend's cost_status:
+//   billed   - the job ran (status=completed); cost_usd is what was billed
+//   pending  - submitted/ready/running/queued; quote will likely become real
+//   canceled - canceled or failed; quote almost certainly not charged
+const STYLES = {
+  billed: {
+    valueClass: "font-medium text-accent-mint",
+    badge: null,
+  },
+  pending: {
+    valueClass: "text-white",
+    badge: {
+      label: "pending",
+      class: "bg-accent-amber/15 text-accent-amber border border-accent-amber/25",
+      title:
+        "Job has not finished. IonQ has computed a quote; it will become a real charge if the job executes.",
+    },
+  },
+  canceled: {
+    valueClass: "text-white/45 line-through decoration-white/20",
+    badge: {
+      label: "void",
+      class: "bg-white/5 text-white/40 border border-white/10",
+      title:
+        "Job was canceled or failed. IonQ's quote stays attached for reference but is not normally charged.",
+    },
+  },
+};
+
+export default function CostCell({ cost, status }) {
   if (cost == null) return <span className="text-white/30">—</span>;
-  if (isQuote) {
-    return (
-      <span className="inline-flex items-baseline gap-1 tabular-nums">
-        <span className="text-white/60">{usd(cost)}</span>
-        <span
-          className="rounded bg-white/5 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-white/40"
-          title="Quoted at submission, not necessarily charged. IonQ only confirms billing for status=completed."
-        >
-          quote
-        </span>
-      </span>
-    );
-  }
+  const s = STYLES[status] || STYLES.pending;
   return (
-    <span className="tabular-nums font-medium text-accent-mint">
-      {usd(cost)}
+    <span className="inline-flex items-baseline gap-1.5 tabular-nums">
+      <span className={s.valueClass}>{usd(cost)}</span>
+      {s.badge && (
+        <span
+          className={`rounded px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider ${s.badge.class}`}
+          title={s.badge.title}
+        >
+          {s.badge.label}
+        </span>
+      )}
     </span>
   );
 }
