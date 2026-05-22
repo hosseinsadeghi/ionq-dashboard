@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Search, RefreshCw, ArrowRight } from "lucide-react";
 import { api } from "../lib/api.js";
 import { num, usd, timeAgo, statusClass } from "../lib/format.js";
+import CostCell from "./CostCell.jsx";
 
 const STATUS_OPTIONS = [
   "",
@@ -123,6 +124,7 @@ export default function Jobs({ onPickJob }) {
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium text-right">Shots</th>
                   <th className="px-4 py-3 font-medium text-right">Qubits</th>
+                  <th className="px-4 py-3 font-medium text-right">Cost</th>
                   <th className="px-4 py-3 font-medium text-right">Created</th>
                   <th className="px-4 py-3" />
                 </tr>
@@ -155,6 +157,9 @@ export default function Jobs({ onPickJob }) {
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums">
                       {num(j.qubits)}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <CostCell cost={j.cost} isQuote={j.cost_is_quote} />
                     </td>
                     <td className="px-4 py-3 text-right text-white/50">
                       {timeAgo(j.request_epoch || j.request)}

@@ -23,6 +23,7 @@ import {
 } from "recharts";
 import { api } from "../lib/api.js";
 import { usd, num, dur, timeAgo, statusClass } from "../lib/format.js";
+import CostCell from "./CostCell.jsx";
 
 const STATUS_PALETTE = {
   completed: "#34d399",
@@ -73,9 +74,13 @@ export default function Overview({ onPickJob }) {
     .map(([name, value]) => ({
       name: shortBackend(name),
       jobs: value,
-      spend: data.backend_spend_usd[name] || 0,
+      billed: data.backend_billed_usd?.[name] || 0,
+      quoted: data.backend_quoted_usd?.[name] || 0,
     }))
-    .sort((a, b) => b.jobs - a.jobs);
+    .sort(
+      (a, b) =>
+        b.billed + b.quoted - (a.billed + a.quoted) || b.jobs - a.jobs
+    );
 
   return (
     <div className="space-y-5">
@@ -94,10 +99,16 @@ export default function Overview({ onPickJob }) {
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          label="Total spend"
-          value={usd(t.total_spend_usd)}
+          label="Billed"
+          value={
+            <span className="text-accent-mint">
+              {usd(t.billed_spend_usd)}
+            </span>
+          }
+          sub={`completed jobs only · quoted ${usd(t.quoted_spend_usd)}`}
+          subTitle="Cost only confirmed for jobs with status=completed. Other rows show IonQ's submission-time quote, which is not necessarily billed."
           icon={Coins}
-          tint="from-accent-violet/30 to-transparent"
+          tint="from-accent-mint/30 to-transparent"
         />
         <StatCard
           label="Jobs seen"
@@ -125,7 +136,11 @@ export default function Overview({ onPickJob }) {
         <div className="glass lg:col-span-2 p-5">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-semibold">Daily activity</div>
-            <div className="text-xs text-white/40">jobs (bars) · spend (line)</div>
+            <div className="flex items-center gap-3 text-[11px] text-white/40">
+              <Swatch color="#34d399" label="billed" />
+              <Swatch color="#a78bfa" label="quoted" />
+              <Swatch color="#22d3ee" label="jobs (count)" />
+            </div>
           </div>
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
@@ -140,10 +155,23 @@ export default function Overview({ onPickJob }) {
                     borderRadius: 8,
                     fontSize: 12,
                   }}
-                  formatter={(v, k) => (k === "spend" ? usd(v) : num(v))}
+                  formatter={(v, k) =>
+                    k === "jobs" ? num(v) : usd(v)
+                  }
                 />
-                <Bar dataKey="jobs" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="spend" fill="#22d3ee" radius={[4, 4, 0, 0]} />
+                <Bar
+                  dataKey="billed"
+                  stackId="cost"
+                  fill="#34d399"
+                  radius={[0, 0, 0, 0]}
+                />
+                <Bar
+                  dataKey="quoted"
+                  stackId="cost"
+                  fill="#a78bfa"
+                  radius={[4, 4, 0, 0]}
+                />
+                <Bar dataKey="jobs" fill="#22d3ee" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -224,8 +252,10 @@ export default function Overview({ onPickJob }) {
                       </span>
                     </td>
                     <td className="py-2.5 pr-3 text-right tabular-nums">{num(j.shots)}</td>
-                    <td className="py-2.5 pr-3 text-right tabular-nums">{usd(j.cost)}</td>
-                    <td className="py-2.5 pr-3 text-right text-white/50">{timeAgo(j.created)}</td>
+                    <td className="py-2.5 pr-3 text-right">
+                      <CostCell cost={j.cost} isQuote={j.cost_is_quote} />
+                    </td>
+                    <td className="py-2.5 pr-3 text-right text-white/50">{timeAgo(j.request_epoch || j.request)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -239,27 +269,51 @@ export default function Overview({ onPickJob }) {
         </div>
 
         <div className="glass p-5">
-          <div className="mb-3 text-sm font-semibold">Spend by backend</div>
-          <div className="space-y-2">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold">Spend by backend</div>
+            <div className="flex items-center gap-2 text-[10px] text-white/40">
+              <Swatch color="#34d399" label="billed" />
+              <Swatch color="#a78bfa" label="quoted" />
+            </div>
+          </div>
+          <div className="space-y-3">
             {backendData.length === 0 && (
               <div className="text-sm text-white/40">No backend usage yet.</div>
             )}
             {backendData.map((b) => {
-              const max = backendData[0].spend || 1;
-              const pct = max > 0 ? Math.max(2, (b.spend / max) * 100) : 0;
+              const max =
+                Math.max(
+                  ...backendData.map((x) => (x.billed || 0) + (x.quoted || 0))
+                ) || 1;
+              const billedPct = (b.billed / max) * 100;
+              const quotedPct = (b.quoted / max) * 100;
               return (
                 <div key={b.name}>
                   <div className="mb-1 flex justify-between text-xs">
                     <span className="text-white/70">{b.name}</span>
                     <span className="tabular-nums text-white/50">
-                      {usd(b.spend)} · {num(b.jobs)} jobs
+                      <span className="text-accent-mint">{usd(b.billed)}</span>
+                      {b.quoted > 0 && (
+                        <>
+                          {" "}+ <span className="text-accent-violet">{usd(b.quoted)}</span>
+                        </>
+                      )}
+                      <span className="text-white/30"> · {num(b.jobs)}j</span>
                     </span>
                   </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-white/5">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-accent-violet to-accent-cyan"
-                      style={{ width: `${pct}%` }}
-                    />
+                  <div className="flex h-1.5 gap-px overflow-hidden rounded-full bg-white/5">
+                    {b.billed > 0 && (
+                      <div
+                        className="h-full bg-accent-mint"
+                        style={{ width: `${billedPct}%` }}
+                      />
+                    )}
+                    {b.quoted > 0 && (
+                      <div
+                        className="h-full bg-accent-violet/70"
+                        style={{ width: `${quotedPct}%` }}
+                      />
+                    )}
                   </div>
                 </div>
               );
@@ -271,7 +325,7 @@ export default function Overview({ onPickJob }) {
   );
 }
 
-function StatCard({ label, value, sub, icon: Icon, tint }) {
+function StatCard({ label, value, sub, subTitle, icon: Icon, tint }) {
   return (
     <div className={`glass relative overflow-hidden p-5`}>
       <div
@@ -282,9 +336,28 @@ function StatCard({ label, value, sub, icon: Icon, tint }) {
           <Icon size={14} /> {label}
         </div>
         <div className="text-2xl font-semibold tracking-tight">{value}</div>
-        {sub && <div className="mt-1 text-[11px] text-white/40">{sub}</div>}
+        {sub && (
+          <div
+            className="mt-1 text-[11px] text-white/40"
+            title={subTitle || undefined}
+          >
+            {sub}
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+function Swatch({ color, label }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span
+        className="h-2 w-2 rounded-sm"
+        style={{ background: color }}
+      />
+      {label}
+    </span>
   );
 }
 

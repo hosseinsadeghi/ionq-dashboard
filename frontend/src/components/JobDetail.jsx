@@ -105,13 +105,19 @@ export default function JobDetail({ jobId, onBack }) {
               <KV label="Shots" value={num(job.shots)} />
               <KV label="Qubits" value={num(job.qubits)} />
               <KV
-                label="Cost"
+                label={job.cost_is_quote ? "Cost (quoted)" : "Cost (billed)"}
                 value={usd(
-                  (typeof cost === "object" && cost?.amount) ||
+                  (typeof cost === "object" && (cost?.amount || cost?.usd)) ||
                     job.cost ||
                     job.actual_cost
                 )}
-                accent
+                accent={!job.cost_is_quote}
+                muted={job.cost_is_quote}
+                hint={
+                  job.cost_is_quote
+                    ? "Submission-time quote under quantum_compute_time. Not necessarily charged."
+                    : undefined
+                }
               />
               <KV
                 label="Predicted cost"
@@ -162,15 +168,21 @@ export default function JobDetail({ jobId, onBack }) {
             </pre>
           </details>
 
-          {cost && (
+          {cost && cost.available !== false && (
             <details className="glass group p-5">
               <summary className="cursor-pointer list-none text-sm font-semibold text-white/80">
-                Cost record
+                Cost record (settled)
               </summary>
               <pre className="mt-3 overflow-auto rounded-xl bg-ink-950/80 p-4 font-mono text-[11px] text-white/70">
 {JSON.stringify(cost, null, 2)}
               </pre>
             </details>
+          )}
+          {cost && cost.available === false && (
+            <div className="glass p-4 text-xs text-white/50">
+              <span className="text-white/70">Settled cost not available:</span>{" "}
+              {cost.reason}
+            </div>
           )}
         </>
       )}
@@ -178,17 +190,16 @@ export default function JobDetail({ jobId, onBack }) {
   );
 }
 
-function KV({ label, value, accent }) {
+function KV({ label, value, accent, muted, hint }) {
+  const color = accent
+    ? "font-semibold text-accent-mint"
+    : muted
+    ? "text-white/70"
+    : "text-white";
   return (
-    <div>
+    <div title={hint || undefined}>
       <div className="label">{label}</div>
-      <div
-        className={`mt-1 text-sm ${
-          accent ? "font-semibold text-accent-mint" : "text-white"
-        }`}
-      >
-        {value ?? "—"}
-      </div>
+      <div className={`mt-1 text-sm ${color}`}>{value ?? "—"}</div>
     </div>
   );
 }

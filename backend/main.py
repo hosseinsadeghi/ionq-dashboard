@@ -364,7 +364,16 @@ async def job_cost(
     x_ionq_key: str | None = Header(default=None),
     x_ionq_key_name: str | None = Header(default=None),
 ) -> Any:
+    """Settled-invoice line for a job. Only exposed on /v0.4 — gracefully
+    degrades for v0.3-only keys so the UI doesn't have to special-case it."""
     key = require_key(x_ionq_key, x_ionq_key_name)
+    version = _VERSION_CACHE.get(key)
+    if version == "v0.3":
+        return {
+            "available": False,
+            "reason": "IonQ's per-job cost endpoint is v0.4-only; this key authorizes v0.3.",
+            "api_version": version,
+        }
     return await ionq_get(f"/jobs/{job_id}/cost", key, allow_404=True)
 
 
@@ -481,6 +490,10 @@ def _normalize_job(job: dict[str, Any], *, include_raw: bool = False) -> dict[st
         "request_epoch": created,
         "response_epoch": completed,
         "children": job.get("children"),
+        # IonQ populates cost_usd at submission as a deterministic quote under
+        # the quantum_compute_time model. Until a job is "completed" the
+        # number is a quote, not a settled charge.
+        "cost_is_quote": (job.get("status") or "unknown") != "completed",
     }
     if include_raw:
         out["raw"] = job
@@ -495,10 +508,13 @@ def _aggregate_summary(
 ) -> dict[str, Any]:
     status_counts: dict[str, int] = defaultdict(int)
     backend_counts: dict[str, int] = defaultdict(int)
-    backend_spend: dict[str, float] = defaultdict(float)
-    daily_spend: dict[str, float] = defaultdict(float)
+    backend_billed: dict[str, float] = defaultdict(float)
+    backend_quoted: dict[str, float] = defaultdict(float)
+    daily_billed: dict[str, float] = defaultdict(float)
+    daily_quoted: dict[str, float] = defaultdict(float)
     daily_jobs: dict[str, int] = defaultdict(int)
-    total_spend = 0.0
+    billed_spend = 0.0
+    quoted_spend = 0.0
     total_shots = 0
     completed = 0
     failed = 0
@@ -510,9 +526,14 @@ def _aggregate_summary(
         status_counts[status] += 1
         backend_counts[backend] += 1
         cost = job.get("cost")
+        is_quote = job.get("cost_is_quote", status != "completed")
         if cost is not None:
-            total_spend += cost
-            backend_spend[backend] += cost
+            if is_quote:
+                quoted_spend += cost
+                backend_quoted[backend] += cost
+            else:
+                billed_spend += cost
+                backend_billed[backend] += cost
         shots = job.get("shots")
         if isinstance(shots, (int, float)):
             total_shots += int(shots)
@@ -524,18 +545,28 @@ def _aggregate_summary(
         if day:
             daily_jobs[day] += 1
             if cost is not None:
-                daily_spend[day] += cost
+                if is_quote:
+                    daily_quoted[day] += cost
+                else:
+                    daily_billed[day] += cost
         recent.append(job)
 
     recent.sort(key=lambda j: (j.get("request_epoch") or 0), reverse=True)
     daily_series = [
-        {"day": d, "spend": round(daily_spend.get(d, 0.0), 4), "jobs": daily_jobs[d]}
+        {
+            "day": d,
+            "billed": round(daily_billed.get(d, 0.0), 4),
+            "quoted": round(daily_quoted.get(d, 0.0), 4),
+            "jobs": daily_jobs[d],
+        }
         for d in sorted(daily_jobs.keys())
     ]
     return {
         "totals": {
             "jobs_seen": len(jobs_list),
-            "total_spend_usd": round(total_spend, 4),
+            "billed_spend_usd": round(billed_spend, 4),
+            "quoted_spend_usd": round(quoted_spend, 4),
+            "total_spend_usd": round(billed_spend + quoted_spend, 4),
             "total_shots": total_shots,
             "completed": completed,
             "failed_or_canceled": failed,
@@ -543,7 +574,13 @@ def _aggregate_summary(
         },
         "status_counts": dict(status_counts),
         "backend_counts": dict(backend_counts),
-        "backend_spend_usd": {k: round(v, 4) for k, v in backend_spend.items()},
+        "backend_billed_usd": {k: round(v, 4) for k, v in backend_billed.items()},
+        "backend_quoted_usd": {k: round(v, 4) for k, v in backend_quoted.items()},
+        # legacy key retained so existing clients don't break — equals billed+quoted
+        "backend_spend_usd": {
+            k: round(backend_billed.get(k, 0) + backend_quoted.get(k, 0), 4)
+            for k in set(backend_billed) | set(backend_quoted)
+        },
         "daily": daily_series,
         "recent_jobs": recent[:50],
         "backends": backends_norm,
