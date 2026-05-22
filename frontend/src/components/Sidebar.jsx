@@ -3,8 +3,8 @@ import {
   Server,
   Activity,
   ListChecks,
+  ExternalLink,
 } from "lucide-react";
-import KeyPicker from "./KeyPicker.jsx";
 
 const NAV = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -13,9 +13,9 @@ const NAV = [
   { id: "calibration", label: "Calibration", icon: Activity },
 ];
 
-export default function Sidebar({ view, setView, onKeyChange }) {
+export default function Sidebar({ view, setView }) {
   return (
-    <aside className="hidden w-64 shrink-0 flex-col border-r border-white/5 bg-ink-900/60 p-4 md:flex">
+    <aside className="hidden w-60 shrink-0 flex-col border-r border-white/5 bg-ink-900/60 p-4 md:flex">
       <div className="mb-6 flex items-center gap-2.5 px-2">
         <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-accent-violet to-accent-cyan shadow-glow">
           <div className="h-3.5 w-3.5 rounded-full bg-ink-950" />
@@ -46,8 +46,25 @@ export default function Sidebar({ view, setView, onKeyChange }) {
         })}
       </nav>
 
-      <div className="mt-auto">
-        <KeyPicker onChange={onKeyChange} />
+      <div className="mt-auto space-y-2">
+        <a
+          href="https://github.com/hosseinsadeghi/ionq-dashboard"
+          target="_blank"
+          rel="noreferrer"
+          className="flex items-center justify-between rounded-lg px-3 py-2 text-xs text-white/40 transition hover:bg-white/5 hover:text-white"
+        >
+          <span>Open source · MIT</span>
+          <ExternalLink size={11} />
+        </a>
+        <a
+          href="https://docs.ionq.com/api-reference"
+          target="_blank"
+          rel="noreferrer"
+          className="flex items-center justify-between rounded-lg px-3 py-2 text-xs text-white/40 transition hover:bg-white/5 hover:text-white"
+        >
+          <span>IonQ API docs</span>
+          <ExternalLink size={11} />
+        </a>
       </div>
     </aside>
   );

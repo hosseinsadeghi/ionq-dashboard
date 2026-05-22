@@ -1,5 +1,6 @@
 import { useState } from "react";
 import Sidebar from "./components/Sidebar.jsx";
+import TopBar from "./components/TopBar.jsx";
 import Overview from "./components/Overview.jsx";
 import Backends from "./components/Backends.jsx";
 import Jobs from "./components/Jobs.jsx";
@@ -33,10 +34,13 @@ export default function App() {
             setView(v);
             setJobId(null);
           }}
-          onKeyChange={() => setKeyEpoch((n) => n + 1)}
         />
-        <main className="flex-1 overflow-y-auto px-5 py-6 md:px-8 md:py-8">
-          <div className="mx-auto max-w-7xl">
+        <main className="flex-1 overflow-y-auto px-5 py-0 md:px-8">
+          <div className="mx-auto max-w-7xl pb-8">
+            <TopBar
+              view={view}
+              onKeyChange={() => setKeyEpoch((n) => n + 1)}
+            />
             {view === "overview" && (
               <Overview key={`o-${keyEpoch}`} onPickJob={openJob} />
             )}
